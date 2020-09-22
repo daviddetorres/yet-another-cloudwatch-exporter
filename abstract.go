@@ -24,52 +24,53 @@ func scrapeAwsData(config conf) ([]*tagsData, []*cloudwatchData) {
 
 	var wg sync.WaitGroup
 
-	for _, job := range config.Discovery.Jobs {
-		for _, roleArn := range job.RoleArns {
-			for _, region := range job.Regions {
+	for _, discoveryJob := range config.Discovery.Jobs {
+		for _, roleArn := range discoveryJob.RoleArns {
+			for _, region := range discoveryJob.Regions {
 				wg.Add(1)
 
-				go func(region string, roleArn string) {
+				go func(discoveryJob job, region string, roleArn string) {
 					defer wg.Done()
 					clientCloudwatch := cloudwatchInterface{
 						client: createCloudwatchSession(&region, roleArn),
 					}
 
 					clientTag := tagsInterface{
-						client:    createTagSession(&region, roleArn),
-						asgClient: createASGSession(&region, roleArn),
-						ec2Client: createEC2Session(&region, roleArn),
+						client:           createTagSession(&region, roleArn),
+						apiGatewayClient: createAPIGatewaySession(&region, roleArn),
+						asgClient:        createASGSession(&region, roleArn),
+						ec2Client:        createEC2Session(&region, roleArn),
 					}
 					var resources []*tagsData
 					var metrics []*cloudwatchData
-					resources, metrics = scrapeDiscoveryJobUsingMetricData(job, region, config.Discovery.ExportedTagsOnMetrics, clientTag, clientCloudwatch)
+					resources, metrics = scrapeDiscoveryJobUsingMetricData(discoveryJob, region, config.Discovery.ExportedTagsOnMetrics, clientTag, clientCloudwatch)
 					mux.Lock()
 					awsInfoData = append(awsInfoData, resources...)
 					cwData = append(cwData, metrics...)
 					mux.Unlock()
-				}(region, roleArn)
+				}(discoveryJob, region, roleArn)
 			}
 		}
 	}
 
-	for _, job := range config.Static {
-		for _, roleArn := range job.RoleArns {
-			for _, region := range job.Regions {
+	for _, staticJob := range config.Static {
+		for _, roleArn := range staticJob.RoleArns {
+			for _, region := range staticJob.Regions {
 				wg.Add(1)
 
-				go func(region string, roleArn string) {
+				go func(staticJob static, region string, roleArn string) {
 					clientCloudwatch := cloudwatchInterface{
 						client: createCloudwatchSession(&region, roleArn),
 					}
 
-					metrics := scrapeStaticJob(job, region, clientCloudwatch)
+					metrics := scrapeStaticJob(staticJob, region, clientCloudwatch)
 
 					mux.Lock()
 					cwData = append(cwData, metrics...)
 					mux.Unlock()
 
 					wg.Done()
-				}(region, roleArn)
+				}(staticJob, region, roleArn)
 			}
 		}
 	}
@@ -125,18 +126,8 @@ func scrapeStaticJob(resource static, region string, clientCloudwatch cloudwatch
 	return cw
 }
 
-func scrapeDiscoveryJobUsingMetricData(
-	job job,
-	region string,
-	tagsOnMetrics exportedTagsOnMetrics,
-	clientTag tagsInterface,
-	clientCloudwatch cloudwatchInterface) (awsInfoData []*tagsData, cw []*cloudwatchData) {
-
-	mux := &sync.Mutex{}
-	var wg sync.WaitGroup
-	var getMetricDatas []cloudwatchData
+func getMetricDataInputLength(job job) int {
 	var length int
-	var jobPeriod int
 
 	// Why is this here? 120?
 	if job.Length == 0 {
@@ -144,55 +135,49 @@ func scrapeDiscoveryJobUsingMetricData(
 	} else {
 		length = job.Length
 	}
-
-	// Set a default period
-	if job.Period == 0 {
-	    jobPeriod = 300
-	} else {
-	    jobPeriod = job.Period
-	}
-
-	tagSemaphore <- struct{}{}
-	resources, err := clientTag.get(job, region)
-	<-tagSemaphore
-
-	// Add the info tags of all the resources
-	for _, resource := range resources {
-		mux.Lock()
-		awsInfoData = append(awsInfoData, resource)
-		mux.Unlock()
-	}
-
-	if err != nil {
-		log.Printf("Couldn't describe resources for region %s: %s\n", region, err.Error())
-		return
-	}
-	// Get the awsDimensions of the job configuration
-	// Common for all the metrics of the job
-	commonJobDimensions := getAwsDimensions(job)
-
-	// For every metric of the job
-	for j := range job.Metrics {
-		metric := job.Metrics[j]
-
+	for _, metric := range job.Metrics {
 		if metric.Length > length {
 			length = metric.Length
 		}
+	}
+	return length
+}
 
+func getMetricPeriod(job job, metric metric) int64 {
+	if metric.Period != 0 {
+		return int64(metric.Period)
+	}
+	if job.Period != 0 {
+		return int64(job.Period)
+	}
+	return int64(300)
+}
+
+func getMetricDataForQueries(
+	discoveryJob job,
+	region string,
+	tagsOnMetrics exportedTagsOnMetrics,
+	clientCloudwatch cloudwatchInterface,
+	resources []*tagsData) []cloudwatchData {
+	var getMetricDatas []cloudwatchData
+
+	// Get the awsDimensions of the job configuration
+	// Common for all the metrics of the job
+	commonJobDimensions := getAwsDimensions(discoveryJob)
+	namespace, _ := getNamespace(discoveryJob.Type)
+	// For every metric of the job
+	for _, metric := range discoveryJob.Metrics {
 		// Get the full list of metrics
 		// This includes, for this metric the possible combinations
 		// of dimensions and value of dimensions with data
 		tagSemaphore <- struct{}{}
-		fullMetricsList := getFullMetricsList(&job.Type, metric, clientCloudwatch)
+		fullMetricsList := getFullMetricsList(namespace, metric, clientCloudwatch)
 		<-tagSemaphore
 
 		// For every resource
-		for i := range resources {
-			resource := resources[i]
-			metricTags := resource.metricTags(tagsOnMetrics)
-
+		for _, resource := range resources {
 			// Creates the dimensions with values for the resource depending on the namespace of the job (p.e. InstanceId=XXXXXXX)
-			dimensionsWithValue := detectDimensionsByService(resource.Service, resource.ID, fullMetricsList)
+			dimensionsWithValue := detectDimensionsByService(resource, fullMetricsList)
 
 			// Adds the dimensions with values of that specific metric of the job
 			dimensionsWithValue = addAdditionalDimensions(dimensionsWithValue, metric.AdditionalDimensions)
@@ -201,44 +186,64 @@ func scrapeDiscoveryJobUsingMetricData(
 			commonJobDimensions = filterDimensionsWithoutValueByDimensionsWithValue(commonJobDimensions, dimensionsWithValue)
 
 			metricsToAdd := filterMetricsBasedOnDimensionsWithValues(dimensionsWithValue, commonJobDimensions, fullMetricsList)
-
-			// If the job property inlyInfoIfData is true
 			if metricsToAdd != nil {
+				addCloudwatchTimestamp := discoveryJob.AddCloudwatchTimestamp || metric.AddCloudwatchTimestamp
+				metricTags := resource.metricTags(tagsOnMetrics)
 				for _, fetchedMetrics := range metricsToAdd.Metrics {
 					for _, stats := range metric.Statistics {
 						id := fmt.Sprintf("id_%d", rand.Int())
-
-						period := int64(jobPeriod)
-						if(metric.Period != 0) {
-						    period = int64(metric.Period)
-						}
-						addCloudwatchTimestamp := job.AddCloudwatchTimestamp || metric.AddCloudwatchTimestamp
-
-						mux.Lock()
+						name := metric.Name
+						nilToZero := metric.NilToZero
 						getMetricDatas = append(getMetricDatas, cloudwatchData{
 							ID:                     resource.ID,
 							MetricID:               &id,
-							Metric:                 &metric.Name,
+							Metric:                 &name,
 							Service:                resource.Service,
 							Statistics:             []string{stats},
-							NilToZero:              &metric.NilToZero,
+							NilToZero:              &nilToZero,
 							AddCloudwatchTimestamp: &addCloudwatchTimestamp,
 							Tags:                   metricTags,
-							CustomTags:             job.CustomTags,
+							CustomTags:             discoveryJob.CustomTags,
 							Dimensions:             fetchedMetrics.Dimensions,
 							Region:                 &region,
-							Period:                 &period,
+							Period:                 getMetricPeriod(discoveryJob, metric),
 						})
-						mux.Unlock()
 					}
 				}
 			}
 		}
 	}
-	wg.Wait()
+	return getMetricDatas
+}
+
+func scrapeDiscoveryJobUsingMetricData(
+	job job,
+	region string,
+	tagsOnMetrics exportedTagsOnMetrics,
+	clientTag tagsInterface,
+	clientCloudwatch cloudwatchInterface) (resources []*tagsData, cw []*cloudwatchData) {
+
+	namespace, err := getNamespace(job.Type)
+	if err != nil {
+		log.Fatal(err.Error())
+	}
+	// Add the info tags of all the resources
+	tagSemaphore <- struct{}{}
+	resources, err = clientTag.get(job, region)
+	<-tagSemaphore
+	if err != nil {
+		log.Printf("Couldn't describe resources for region %s: %s\n", region, err.Error())
+		return
+	}
+
+	getMetricDatas := getMetricDataForQueries(job, region, tagsOnMetrics, clientCloudwatch, resources)
 	maxMetricCount := *metricsPerQuery
 	metricDataLength := len(getMetricDatas)
+	length := getMetricDataInputLength(job)
 	partition := int(math.Ceil(float64(metricDataLength) / float64(maxMetricCount)))
+
+	mux := &sync.Mutex{}
+	var wg sync.WaitGroup
 	wg.Add(partition)
 	for i := 0; i < metricDataLength; i += maxMetricCount {
 		go func(i int) {
@@ -247,13 +252,7 @@ func scrapeDiscoveryJobUsingMetricData(
 			if end > metricDataLength {
 				end = metricDataLength
 			}
-			filter := createGetMetricDataInput(
-				getMetricDatas[i:end],
-				getNamespace(resources[0].Service),
-				length,
-				job.Delay,
-			)
-
+			filter := createGetMetricDataInput(getMetricDatas[i:end], &namespace, length, job.Delay)
 			data := clientCloudwatch.getMetricData(filter)
 			if data != nil {
 				for _, MetricDataResult := range data.MetricDataResults {
@@ -272,7 +271,7 @@ func scrapeDiscoveryJobUsingMetricData(
 		}(i)
 	}
 	wg.Wait()
-	return awsInfoData, cw
+	return resources, cw
 }
 
 func (r tagsData) filterThroughTags(filterTags []tag) bool {

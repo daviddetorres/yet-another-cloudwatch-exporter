@@ -30,6 +30,9 @@ var (
 		Name: "yace_cloudwatch_autoscalingapi_requests_total",
 		Help: "Help is not implemented yet.",
 	})
+	apiGatewayAPICounter = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "yace_cloudwatch_apigatewayapi_requests_total",
+	})
 	ec2APICounter = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "yace_cloudwatch_ec2api_requests_total",
 		Help: "Help is not implemented yet.",
@@ -123,9 +126,9 @@ func promString(text string) string {
 }
 
 func promStringTag(text string) string {
-    if *labelsSnakeCase {
-        return promString(text)
-    }
+	if *labelsSnakeCase {
+		return promString(text)
+	}
 	return replaceWithUnderscores(text)
 }
 
@@ -142,6 +145,8 @@ func replaceWithUnderscores(text string) string {
 		"=", "_",
 		"“", "_",
 		"@", "_",
+		"<", "_",
+		">", "_",
 	)
 	return replacer.Replace(text)
 }

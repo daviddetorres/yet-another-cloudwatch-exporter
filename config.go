@@ -21,17 +21,17 @@ type discovery struct {
 type exportedTagsOnMetrics map[string][]string
 
 type job struct {
-	Regions                 []string `yaml:"regions"`
-	Type                    string   `yaml:"type"`
-	RoleArns                []string `yaml:"roleArns"`
-	AwsDimensions           []string `yaml:"awsDimensions"`
-	SearchTags              []tag    `yaml:"searchTags"`
-	CustomTags              []tag    `yaml:"customTags"`
-	Metrics                 []metric `yaml:"metrics"`
-	Length                  int      `yaml:"length"`
-	Delay                   int      `yaml:"delay"`
-  Period                  int      `yaml:"period"`
-	AddCloudwatchTimestamp  bool     `yaml:"addCloudwatchTimestamp"`
+	Regions                []string `yaml:"regions"`
+	Type                   string   `yaml:"type"`
+	RoleArns               []string `yaml:"roleArns"`
+	AwsDimensions          []string `yaml:"awsDimensions"`
+	SearchTags             []tag    `yaml:"searchTags"`
+	CustomTags             []tag    `yaml:"customTags"`
+	Metrics                []metric `yaml:"metrics"`
+	Length                 int      `yaml:"length"`
+	Delay                  int      `yaml:"delay"`
+	Period                 int      `yaml:"period"`
+	AddCloudwatchTimestamp bool     `yaml:"addCloudwatchTimestamp"`
 }
 
 type static struct {
@@ -74,22 +74,10 @@ func (c *conf) load(file *string) error {
 	if err != nil {
 		return err
 	}
+
 	for n, job := range c.Discovery.Jobs {
 		if len(job.RoleArns) == 0 {
 			c.Discovery.Jobs[n].RoleArns = []string{""} // use current IAM role
-		}
-		if !stringInSlice(job.Type, supportedServices) {
-			return fmt.Errorf("Service is not in known list!: %v", job.Type)
-		}
-
-		for _, metric := range job.Metrics {
-			if job.Length < 300 && metric.Length < 300 {
-				log.Warn("WATCH OUT! - Metric length of less than 5 minutes configured which is default for most cloudwatch metrics e.g. ELBs")
-			}
-
-			if job.Period < 1 && metric.Period < 1 {
-				return fmt.Errorf("Period value should be a positive integer")
-			}
 		}
 	}
 	for n, job := range c.Static {
@@ -97,5 +85,108 @@ func (c *conf) load(file *string) error {
 			c.Static[n].RoleArns = []string{""} // use current IAM role
 		}
 	}
+
+	err = c.validate()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *conf) validate() error {
+	if c.Discovery.Jobs == nil && c.Static == nil {
+		return fmt.Errorf("At least 1 Discovery job or 1 Static must be defined")
+	}
+
+	if c.Discovery.Jobs != nil {
+		for idx, job := range c.Discovery.Jobs {
+			err := c.validateDiscoveryJob(job, idx)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	if c.Static != nil {
+		for idx, job := range c.Static {
+			err := c.validateStaticJob(job, idx)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func (c *conf) validateDiscoveryJob(j job, jobIdx int) error {
+	if j.Type != "" {
+		if !stringInSlice(j.Type, supportedServices) {
+			return fmt.Errorf("Discovery job [%d]: Service is not in known list!: %s", jobIdx, j.Type)
+		}
+	} else {
+		return fmt.Errorf("Discovery job [%d]: Type should not be empty", jobIdx)
+	}
+	if len(j.Regions) == 0 {
+		return fmt.Errorf("Discovery job [%s/%d]: Regions should not be empty", j.Type, jobIdx)
+	}
+	if len(j.Metrics) == 0 {
+		return fmt.Errorf("Discovery job [%s/%d]: Metrics should not be empty", j.Type, jobIdx)
+	}
+	for metricIdx, metric := range j.Metrics {
+		parent := fmt.Sprintf("Discovery job [%s/%d]", j.Type, jobIdx)
+		err := c.validateMetric(metric, metricIdx, parent, &j)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (c *conf) validateStaticJob(j static, jobIdx int) error {
+	if j.Name == "" {
+		return fmt.Errorf("Static job [%v]: Name should not be empty", jobIdx)
+	}
+	if j.Namespace == "" {
+		return fmt.Errorf("Static job [%s/%d]: Namespace should not be empty", j.Name, jobIdx)
+	}
+	if len(j.Regions) == 0 {
+		return fmt.Errorf("Static job [%s/%d]: Regions should not be empty", j.Name, jobIdx)
+	}
+	for metricIdx, metric := range j.Metrics {
+		err := c.validateMetric(metric, metricIdx, fmt.Sprintf("Static job [%s/%d]", j.Name, jobIdx), nil)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (c *conf) validateMetric(m metric, metricIdx int, parent string, discovery *job) error {
+	if m.Name == "" {
+		return fmt.Errorf("Metric [%s/%d] in %v: Name should not be empty", m.Name, metricIdx, parent)
+	}
+	if len(m.Statistics) == 0 {
+		return fmt.Errorf("Metric [%s/%d] in %v: Statistics should not be empty", m.Name, metricIdx, parent)
+	}
+	mPeriod := m.Period
+	if mPeriod == 0 && discovery != nil {
+		mPeriod = discovery.Period
+	}
+	if mPeriod < 1 {
+		return fmt.Errorf("Metric [%s/%d] in %v: Period value should be a positive integer", m.Name, metricIdx, parent)
+	}
+	mLength := m.Length
+	if mLength == 0 && discovery != nil {
+		mLength = discovery.Length
+	}
+	if mLength < mPeriod {
+		log.Warningf(
+			"Metric [%s/%d] in %v: length(%d) is smaller than period(%d). This can cause that the data requested is not ready and generate data gaps",
+			m.Name, metricIdx, parent, mLength, mPeriod)
+	}
+
 	return nil
 }

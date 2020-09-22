@@ -1,3 +1,59 @@
+# 0.21.0-alpha
+
+- Big tidy up of code, remove old methods and refactor used ones (jylitalo)
+- Fix crashes where labels are not collected correctly (rrusso1982)
+- Fix pointer bug causing metrics to be missing (jylitalo)
+- Allow more then 25 apigateways to be discovered (udhos)
+
+# 0.20.0-alpha
+
+- Add api-gateway support (smcavallo)
+- Improve metrics validation (jylitalo)
+- Fix metrics with '<', '>' chars
+
+# 0.19.1-alpha
+
+- Remove error during build
+
+# 0.19.0-alpha
+Wow what a release. Thanks to all contributors. This is
+our biggest release and it made me a lot of fun to see all those
+contributions. From small doc changes (love those) to major rewrites
+of big components or new complex features. Thanks!
+
+* *BREAKING CHANGE* Add support for multiple roleArns (jylitalo)
+```yaml
+# Before
+---
+discovery:
+  jobs:
+  - type: rds
+    roleArn: "arn:aws:iam::123456789012:role/Prometheus"
+# After
+discovery:
+  jobs:
+  - type: rds
+    roleArns:
+    - "arn:aws:iam::123456789012:role/Prometheus"
+```
+* Upgrade golang from 1.12 to 1.14
+* Major linting of code and improving global code quality. (jylitalo)
+* Improve logging (jylitalo)
+* Add config validation. (daviddetorres)
+* Added support for tags with '@' char included (afroschauer )
+* Added Transit Gateway Attachment Metrics (rhys-evans)
+* Fix information gathering if no data is retrieved by cloudwatch (daviddetorres)
+* Improve docs (calvinbui)
+* Add redshift support (smcavallo)
+* Allow easier configuration through adding period / addCloudwatchTimestamp setting additionally
+  to job level. (rrusso1982)
+* Add initial unit tests (smcavallo)
+* Add new configuration to allow snake case labels (rrusso1982)
+* Fix complex metric dimension bug (rrusso1982)
+* Upgrade golang packages (smcavallo)
+* Set up correct partition for ASG for AWS China and GovCloud Regions (smcavallo)
+* Add ability to set custom tags to discovery job metrics (goya)
+
 # 0.18.0-alpha
 * *BREAKING CHANGE* Add support for multiple regions (goya)
 ```yaml

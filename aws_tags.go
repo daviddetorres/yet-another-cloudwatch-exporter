@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/aws/aws-sdk-go/service/apigateway"
+	"github.com/aws/aws-sdk-go/service/apigateway/apigatewayiface"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -19,6 +22,7 @@ import (
 
 type tagsData struct {
 	ID      *string
+	Matcher *string
 	Tags    []*tag
 	Service *string
 	Region  *string
@@ -26,130 +30,109 @@ type tagsData struct {
 
 // https://docs.aws.amazon.com/sdk-for-go/api/service/resourcegroupstaggingapi/resourcegroupstaggingapiiface/
 type tagsInterface struct {
-	client    resourcegroupstaggingapiiface.ResourceGroupsTaggingAPIAPI
-	asgClient autoscalingiface.AutoScalingAPI
-	ec2Client ec2iface.EC2API
+	client           resourcegroupstaggingapiiface.ResourceGroupsTaggingAPIAPI
+	asgClient        autoscalingiface.AutoScalingAPI
+	apiGatewayClient apigatewayiface.APIGatewayAPI
+	ec2Client        ec2iface.EC2API
+}
+
+func createSession(roleArn string, config *aws.Config) *session.Session {
+	sess, err := session.NewSession()
+	if err != nil {
+		log.Fatalf("Failed to create session due to %v", err)
+	}
+	if roleArn != "" {
+		config.Credentials = stscreds.NewCredentials(sess, roleArn)
+	}
+	return sess
 }
 
 func createTagSession(region *string, roleArn string) *r.ResourceGroupsTaggingAPI {
-	sess, err := session.NewSession()
-	if err != nil {
-		log.Fatal(err)
-	}
 	maxResourceGroupTaggingRetries := 5
 	config := &aws.Config{Region: region, MaxRetries: &maxResourceGroupTaggingRetries}
-	if roleArn != "" {
-		config.Credentials = stscreds.NewCredentials(sess, roleArn)
-	}
-
-	return r.New(sess, config)
+	return r.New(createSession(roleArn, config), config)
 }
 
 func createASGSession(region *string, roleArn string) autoscalingiface.AutoScalingAPI {
-	sess, err := session.NewSession()
-	if err != nil {
-		log.Fatal(err)
-	}
 	maxAutoScalingAPIRetries := 5
 	config := &aws.Config{Region: region, MaxRetries: &maxAutoScalingAPIRetries}
-	if roleArn != "" {
-		config.Credentials = stscreds.NewCredentials(sess, roleArn)
-	}
-
-	return autoscaling.New(sess, config)
+	return autoscaling.New(createSession(roleArn, config), config)
 }
 
 func createEC2Session(region *string, roleArn string) ec2iface.EC2API {
+	maxEC2APIRetries := 10
+	config := &aws.Config{Region: region, MaxRetries: &maxEC2APIRetries}
+	return ec2.New(createSession(roleArn, config), config)
+}
+
+func createAPIGatewaySession(region *string, roleArn string) apigatewayiface.APIGatewayAPI {
 	sess, err := session.NewSession()
 	if err != nil {
 		log.Fatal(err)
 	}
-	maxEC2APIRetries := 10
-	config := &aws.Config{Region: region, MaxRetries: &maxEC2APIRetries}
+	maxApiGatewaygAPIRetries := 5
+	config := &aws.Config{Region: region, MaxRetries: &maxApiGatewaygAPIRetries}
 	if roleArn != "" {
 		config.Credentials = stscreds.NewCredentials(sess, roleArn)
 	}
 
-	return ec2.New(sess, config)
+	return apigateway.New(sess, config)
 }
 
 func (iface tagsInterface) get(job job, region string) (resources []*tagsData, err error) {
-	c := iface.client
-
-	var filter []*string
-
 	switch job.Type {
-	case "alb":
-		filter = append(filter, aws.String("elasticloadbalancing:loadbalancer/app"))
-		filter = append(filter, aws.String("elasticloadbalancing:targetgroup"))
-	case "appsync":
-		filter = append(filter, aws.String("appsync"))
-	case "cf":
-		filter = append(filter, aws.String("cloudfront"))
 	case "asg":
 		return iface.getTaggedAutoscalingGroups(job, region)
-	case "dynamodb":
-		filter = append(filter, aws.String("dynamodb:table"))
-	case "ebs":
-		filter = append(filter, aws.String("ec2:volume"))
-	case "ec":
-		filter = append(filter, aws.String("elasticache:cluster"))
-	case "ec2":
-		filter = append(filter, aws.String("ec2:instance"))
-	case "ecs-svc", "ecs-containerinsights":
-		filter = append(filter, aws.String("ecs:cluster"))
-		filter = append(filter, aws.String("ecs:service"))
-	case "efs":
-		filter = append(filter, aws.String("elasticfilesystem:file-system"))
-	case "elb":
-		filter = append(filter, aws.String("elasticloadbalancing:loadbalancer"))
-	case "emr":
-		filter = append(filter, aws.String("elasticmapreduce:cluster"))
-	case "es":
-		filter = append(filter, aws.String("es:domain"))
-	case "firehose":
-		filter = append(filter, aws.String("firehose"))
-	case "fsx":
-		filter = append(filter, aws.String("fsx:file-system"))
-	case "kinesis":
-		filter = append(filter, aws.String("kinesis:stream"))
-	case "lambda":
-		filter = append(filter, aws.String("lambda:function"))
-	case "ngw":
-		filter = append(filter, aws.String("ec2:natgateway"))
-	case "nlb":
-		filter = append(filter, aws.String("elasticloadbalancing:loadbalancer/net"))
-	case "rds":
-		filter = append(filter, aws.String("rds:db"))
-	case "redshift":
-		filter = append(filter, aws.String("redshift:cluster"))
-	case "r53r":
-		filter = append(filter, aws.String("route53resolver"))
-	case "s3":
-		filter = append(filter, aws.String("s3"))
-	case "sfn":
-		filter = append(filter, aws.String("states"))
-	case "sns":
-		filter = append(filter, aws.String("sns"))
-	case "sqs":
-		filter = append(filter, aws.String("sqs"))
-	case "tgw":
-		filter = append(filter, aws.String("ec2:transit-gateway"))
 	case "tgwa":
 		return iface.getTaggedTransitGatewayAttachments(job, region)
-	case "vpn":
-		filter = append(filter, aws.String("ec2:vpn-connection"))
-	case "kafka":
-		filter = append(filter, aws.String("kafka:cluster"))
-	default:
-		log.Fatal("Not implemented resources:" + job.Type)
 	}
 
-	inputparams := r.GetResourcesInput{ResourceTypeFilters: filter}
-
+	allResourceTypesFilters := map[string][]string{
+		"alb":                   {"elasticloadbalancing:loadbalancer/app", "elasticloadbalancing:targetgroup"},
+		"apigateway":            {"apigateway"},
+		"appsync":               {"appsync"},
+		"cf":                    {"cloudfront"},
+		"dynamodb":              {"dynamodb:table"},
+		"ebs":                   {"ec2:volume"},
+		"ec":                    {"elasticache:cluster"},
+		"ec2":                   {"ec2:instance"},
+		"ecs-svc":               {"ecs:cluster", "ecs:service"},
+		"ecs-containerinsights": {"ecs:cluster", "ecs:service"},
+		"efs":                   {"elasticfilesystem:file-system"},
+		"elb":                   {"elasticloadbalancing:loadbalancer"},
+		"emr":                   {"elasticmapreduce:cluster"},
+		"es":                    {"es:domain"},
+		"firehose":              {"firehose"},
+		"fsx":                   {"fsx:file-system"},
+		"kinesis":               {"kinesis:stream"},
+		"lambda":                {"lambda:function"},
+		"ngw":                   {"ec2:natgateway"},
+		"nlb":                   {"elasticloadbalancing:loadbalancer/net"},
+		"rds":                   {"rds:db"},
+		"redshift":              {"redshift:cluster"},
+		"r53r":                  {"route53resolver"},
+		"s3":                    {"s3"},
+		"sfn":                   {"states"},
+		"sns":                   {"sns"},
+		"sqs":                   {"sqs"},
+		"tgw":                   {"ec2:transit-gateway"},
+		"vpn":                   {"ec2:vpn-connection"},
+		"kafka":                 {"kafka:cluster"},
+	}
+	var inputparams r.GetResourcesInput
+	if resourceTypeFilters, ok := allResourceTypesFilters[job.Type]; ok {
+		var filters []*string
+		for _, filter := range resourceTypeFilters {
+			filters = append(filters, aws.String(filter))
+		}
+		inputparams.ResourceTypeFilters = filters
+	} else {
+		log.Fatal("Not implemented resources:" + job.Type)
+	}
+	c := iface.client
 	ctx := context.Background()
 	pageNum := 0
-	return resources, c.GetResourcesPagesWithContext(ctx, &inputparams, func(page *r.GetResourcesOutput, lastPage bool) bool {
+	resourcePages := c.GetResourcesPagesWithContext(ctx, &inputparams, func(page *r.GetResourcesOutput, lastPage bool) bool {
 		pageNum++
 		resourceGroupTaggingAPICounter.Inc()
 		for _, resourceTagMapping := range page.ResourceTagMappingList {
@@ -170,9 +153,41 @@ func (iface tagsInterface) get(job job, region string) (resources []*tagsData, e
 		}
 		return pageNum < 100
 	})
+
+	switch job.Type {
+	case "apigateway":
+		// Get all the api gateways from aws
+		apiGateways, errGet := iface.getTaggedApiGateway()
+		if errGet != nil {
+			log.Errorf("tagsInterface.get: apigateway: getTaggedApiGateway: %v", errGet)
+			return resources, errGet
+		}
+		var filteredResources []*tagsData
+		for _, r := range resources {
+			// For each tagged resource, find the associated restApi
+			// And swap out the ID with the name
+			if strings.Contains(*r.ID, "/restapis") {
+				restApiId := strings.Split(*r.ID, "/")[2]
+				for _, apiGateway := range apiGateways.Items {
+					if *apiGateway.Id == restApiId {
+						r.Matcher = apiGateway.Name
+					}
+				}
+				if r.Matcher == nil {
+					log.Errorf("tagsInterface.get: apigateway: resource=%s restApiId=%s could not find gateway", *r.ID, restApiId)
+					continue // exclude resource to avoid crash later
+				}
+				filteredResources = append(filteredResources, r)
+			}
+		}
+		resources = filteredResources
+	}
+
+	return resources, resourcePages
 }
 
 // Once the resourcemappingapi supports ASGs then this workaround method can be deleted
+// https://docs.aws.amazon.com/sdk-for-go/api/service/resourcegroupstaggingapi/
 func (iface tagsInterface) getTaggedAutoscalingGroups(job job, region string) (resources []*tagsData, err error) {
 	ctx := context.Background()
 	pageNum := 0
@@ -201,6 +216,23 @@ func (iface tagsInterface) getTaggedAutoscalingGroups(job job, region string) (r
 			}
 			return pageNum < 100
 		})
+}
+
+// Get all ApiGateways REST
+func (iface tagsInterface) getTaggedApiGateway() (*apigateway.GetRestApisOutput, error) {
+	ctx := context.Background()
+	apiGatewayAPICounter.Inc()
+	var limit int64 = 500 // max number of results per page. default=25, max=500
+	const maxPages = 10
+	input := apigateway.GetRestApisInput{Limit: &limit}
+	output := apigateway.GetRestApisOutput{}
+	var pageNum int
+	err := iface.apiGatewayClient.GetRestApisPagesWithContext(ctx, &input, func(page *apigateway.GetRestApisOutput, lastPage bool) bool {
+		pageNum++
+		output.Items = append(output.Items, page.Items...)
+		return pageNum <= maxPages
+	})
+	return &output, err
 }
 
 func (iface tagsInterface) getTaggedTransitGatewayAttachments(job job, region string) (resources []*tagsData, err error) {
